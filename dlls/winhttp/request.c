@@ -398,7 +398,7 @@ static BOOL delete_header( request_t *request, DWORD index )
     return TRUE;
 }
 
-static BOOL process_header( request_t *request, LPCWSTR field, LPCWSTR value, DWORD flags, BOOL request_only )
+BOOL process_header( request_t *request, LPCWSTR field, LPCWSTR value, DWORD flags, BOOL request_only )
 {
     int index;
     struct header hdr;
@@ -2227,16 +2227,11 @@ static BOOL send_request( request_t *request, LPCWSTR headers, DWORD headers_len
     session_t *session = connect->session;
     char *wire_req;
     int bytes_sent;
-    DWORD len, i, flags;
+    DWORD len;
 
     clear_response_headers( request );
     drain_content( request );
 
-    flags = WINHTTP_ADDREQ_FLAG_ADD|WINHTTP_ADDREQ_FLAG_COALESCE_WITH_COMMA;
-    for (i = 0; i < request->num_accept_types; i++)
-    {
-        process_header( request, attr_accept, request->accept_types[i], flags, TRUE );
-    }
     if (session->agent)
         process_header( request, attr_user_agent, session->agent, WINHTTP_ADDREQ_FLAG_ADD_IF_NEW, TRUE );
 
