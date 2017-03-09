@@ -2497,6 +2497,7 @@ NTSTATUS WINAPI NtQuerySystemInformation(
                             spi->UniqueProcessId = UlongToHandle(reply->pid);
                             spi->ParentProcessId = UlongToHandle(reply->ppid);
                             spi->HandleCount = reply->handles;
+                            spi->CreationTime.QuadPart = reply->start_time;
 
                             /* spi->ti will be set later on */
 
