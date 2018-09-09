@@ -987,6 +987,7 @@ static HMODULE load_library( const UNICODE_STRING *libname, DWORD flags )
     if( flags & unsupported_flags)
         FIXME("unsupported flag(s) used (flags: 0x%08x)\n", flags);
 
+#if 1
     if((p = strcasestrW(libname->Buffer, steamclientW)) &&
             (p == libname->Buffer ||
              *(p - 1) != 'l')){
@@ -1016,6 +1017,7 @@ static HMODULE load_library( const UNICODE_STRING *libname, DWORD flags )
 
         return steamclient_hmod;
     }
+#endif
 
     if (flags & load_library_search_flags)
         load_path = get_dll_load_path_search_flags( libname->Buffer, flags );
