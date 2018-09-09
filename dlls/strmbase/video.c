@@ -94,6 +94,7 @@ HRESULT WINAPI BaseControlVideoImpl_GetTypeInfo(IBasicVideo *iface, UINT iTInfo,
     return BaseDispatchImpl_GetTypeInfo(&This->baseDispatch, &IID_NULL, iTInfo, lcid, ppTInfo);
 }
 
+__attribute__((optimize ("omit-frame-pointer")))
 HRESULT WINAPI BaseControlVideoImpl_GetIDsOfNames(IBasicVideo *iface, REFIID riid, LPOLESTR *rgszNames, UINT cNames, LCID lcid, DISPID *rgDispId)
 {
     BaseControlVideo *This = impl_from_IBasicVideo(iface);
