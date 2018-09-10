@@ -61,6 +61,14 @@ const char * CDECL NTDLL_wine_get_version(void)
 }
 
 /*********************************************************************
+ *                  wine_get_patches   (NTDLL.@)
+ */
+const void * CDECL NTDLL_wine_get_patches(void)
+{
+    return wine_get_patches();
+}
+
+/*********************************************************************
  *                  wine_get_build_id   (NTDLL.@)
  */
 const char * CDECL NTDLL_wine_get_build_id(void)
@@ -503,4 +511,15 @@ NTSTATUS WINAPI NtCreateLowBoxToken(HANDLE *token_handle, HANDLE existing_token_
     /* We need to return a NULL handle since later it will be passed to CloseHandle and that must not fail */
     *token_handle = NULL;
     return STATUS_SUCCESS;
+}
+
+/*********************************************************************
+ *                  ApiSetQueryApiSetPresence   (NTDLL.@)
+ */
+BOOL WINAPI ApiSetQueryApiSetPresence(const UNICODE_STRING *namespace, BOOLEAN *present)
+{
+    FIXME("(%s, %p) stub!\n", debugstr_us(namespace), present);
+
+    *present = TRUE;
+    return TRUE;
 }
