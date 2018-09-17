@@ -79,6 +79,7 @@ static struct {
 
 static UINT (WINAPI *pSendInput) (UINT, INPUT*, size_t);
 static BOOL (WINAPI *pGetCurrentInputMessageSource)( INPUT_MESSAGE_SOURCE *source );
+static BOOL (WINAPI *pGetPointerType)(UINT32, POINTER_INPUT_TYPE*);
 static int (WINAPI *pGetMouseMovePointsEx) (UINT, LPMOUSEMOVEPOINT, LPMOUSEMOVEPOINT, int, DWORD);
 static UINT (WINAPI *pGetRawInputDeviceList) (PRAWINPUTDEVICELIST, PUINT, UINT);
 static int  (WINAPI *pGetWindowRgnBox)(HWND, LPRECT);
@@ -165,6 +166,7 @@ static void init_function_pointers(void)
     GET_PROC(SendInput);
     GET_PROC(GetCurrentInputMessageSource);
     GET_PROC(GetMouseMovePointsEx);
+    GET_PROC(GetPointerType);
     GET_PROC(GetRawInputDeviceList);
     GET_PROC(GetWindowRgnBox);
 #undef GET_PROC
@@ -3004,6 +3006,16 @@ static void test_input_message_source(void)
     UnregisterClassA( cls.lpszClassName, GetModuleHandleA(0) );
 }
 
+static void test_GetPointerType(void)
+{
+    BOOL ret;
+    POINTER_INPUT_TYPE type = -1;
+
+    ret = pGetPointerType(1, &type);
+    ok(ret, "GetPointerType failed, got type %d for 1\n", type );
+    ok(type != -1, " type %d\n", type );
+}
+
 START_TEST(input)
 {
     POINT pos;
@@ -3048,4 +3060,9 @@ START_TEST(input)
         win_skip("GetCurrentInputMessageSource is not available\n");
 
     SetCursorPos( pos.x, pos.y );
+
+    if(pGetPointerType)
+        test_GetPointerType();
+    else
+        win_skip("GetPointerType is not available\n");
 }
