@@ -65,6 +65,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(process);
 WINE_DECLARE_DEBUG_CHANNEL(relay);
+WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
 #ifdef __APPLE__
 extern char **__wine_get_main_environment(void);
@@ -72,6 +73,8 @@ extern char **__wine_get_main_environment(void);
 extern char **__wine_main_environ;
 static char **__wine_get_main_environment(void) { return __wine_main_environ; }
 #endif
+
+extern void __wine_ldr_start_process(void *kernel_start);
 
 typedef struct
 {
@@ -444,9 +447,17 @@ static HANDLE open_exe_file( const WCHAR *name, BOOL *is_64bit )
  */
 static BOOL find_exe_file( const WCHAR *name, WCHAR *buffer, int buflen, HANDLE *handle )
 {
+    WCHAR cur_dir[MAX_PATH];
+
     TRACE("looking for %s\n", debugstr_w(name) );
 
-    if (!SearchPathW( NULL, name, exeW, buflen, buffer, NULL ) &&
+    /* The working directory takes precedence over other locations for CreateProcess unless the
+     * 'NoDefaultCurrentDirectoryInExePath' environment variable is set (and the executable name
+     * does not contain a backslash). */
+    if ((NeedCurrentDirectoryForExePathW( name ) && GetCurrentDirectoryW( MAX_PATH, cur_dir) &&
+         !SearchPathW( cur_dir, name, exeW, buflen, buffer, NULL )) &&
+        /* not found in the working directory, try the system search path */
+        !SearchPathW( NULL, name, exeW, buflen, buffer, NULL ) &&
         /* no builtin found, try native without extension in case it is a Unix app */
         !SearchPathW( NULL, name, NULL, buflen, buffer, NULL )) return FALSE;
 
@@ -1214,12 +1225,19 @@ __ASM_GLOBAL_FUNC( call_process_entry,
                     __ASM_CFI(".cfi_rel_offset %ebp,0\n\t")
                     "movl %esp,%ebp\n\t"
                     __ASM_CFI(".cfi_def_cfa_register %ebp\n\t")
+                    "pushl %ebx\n\t"
+                    __ASM_CFI(".cfi_rel_offset %ebx,-4\n\t")
+                    "subl $12,%esp\n\t"
                     "pushl 4(%ebp)\n\t"  /* deliberately mis-align the stack by 8, Doom 3 needs this */
                     "pushl 4(%ebp)\n\t"  /* Driller expects readable address at this offset */
                     "pushl 4(%ebp)\n\t"
                     "pushl 8(%ebp)\n\t"
+                    "movl 8(%ebp),%ebx\n\t"
                     "call *12(%ebp)\n\t"
-                    "leave\n\t"
+                    "leal -4(%ebp),%esp\n\t"
+                    "popl %ebx\n\t"
+                    __ASM_CFI(".cfi_same_value %ebx\n\t")
+                    "popl %ebp\n\t"
                     __ASM_CFI(".cfi_def_cfa %esp,4\n\t")
                     __ASM_CFI(".cfi_same_value %ebp\n\t")
                     "ret" )
@@ -1265,6 +1283,15 @@ void WINAPI start_process( LPTHREAD_START_ROUTINE entry, PEB *peb )
 
     __TRY
     {
+        if (CreateEventA(0, 0, 0, "__winestaging_warn_event") && GetLastError() != ERROR_ALREADY_EXISTS)
+        {
+            FIXME_(winediag)("Wine Staging %s is a testing version containing experimental patches.\n", wine_get_version());
+            FIXME_(winediag)("Please mention your exact version when filing bug reports on winehq.org.\n");
+        }
+        else
+            WARN_(winediag)("Wine Staging %s is a testing version containing experimental patches.\n", wine_get_version());
+
+
         if (!CheckRemoteDebuggerPresent( GetCurrentProcess(), &being_debugged ))
             being_debugged = FALSE;
 
@@ -1470,7 +1497,7 @@ void CDECL __wine_kernel_init(void)
 
     if (!params->CurrentDirectory.Handle) chdir("/"); /* avoid locking removable devices */
 
-    LdrInitializeThunk( start_process_wrapper, 0, 0, 0 );
+    __wine_ldr_start_process( start_process_wrapper );
 
  error:
     ExitProcess( GetLastError() );
@@ -2197,7 +2224,7 @@ static NTSTATUS alloc_object_attributes( const SECURITY_ATTRIBUTES *attr, struct
  * Create a new process. If hFile is a valid handle we have an exe
  * file, otherwise it is a Winelib app.
  */
-static BOOL create_process( HANDLE hFile, LPCWSTR filename, LPWSTR cmd_line, LPWSTR env,
+static BOOL create_process( HANDLE token, HANDLE hFile, LPCWSTR filename, LPWSTR cmd_line, LPWSTR env,
                             LPCWSTR cur_dir, LPSECURITY_ATTRIBUTES psa, LPSECURITY_ATTRIBUTES tsa,
                             BOOL inherit, DWORD flags, LPSTARTUPINFOW startup,
                             LPPROCESS_INFORMATION info, LPCSTR unixdir,
@@ -2304,6 +2331,7 @@ static BOOL create_process( HANDLE hFile, LPCWSTR filename, LPWSTR cmd_line, LPW
         req->access         = PROCESS_ALL_ACCESS;
         req->cpu            = pe_info->cpu;
         req->info_size      = startup_info_size;
+        req->token          = wine_server_obj_handle( token );
         wine_server_add_data( req, objattr, attr_len );
         wine_server_add_data( req, startup_info, startup_info_size );
         wine_server_add_data( req, params->Environment, (env_end - params->Environment) * sizeof(WCHAR) );
@@ -2421,7 +2449,7 @@ error:
  *
  * Create a new VDM process for a 16-bit or DOS application.
  */
-static BOOL create_vdm_process( LPCWSTR filename, LPWSTR cmd_line, LPWSTR env, LPCWSTR cur_dir,
+static BOOL create_vdm_process( HANDLE token, LPCWSTR filename, LPWSTR cmd_line, LPWSTR env, LPCWSTR cur_dir,
                                 LPSECURITY_ATTRIBUTES psa, LPSECURITY_ATTRIBUTES tsa,
                                 BOOL inherit, DWORD flags, LPSTARTUPINFOW startup,
                                 LPPROCESS_INFORMATION info, LPCSTR unixdir, int exec_only )
@@ -2446,7 +2474,7 @@ static BOOL create_vdm_process( LPCWSTR filename, LPWSTR cmd_line, LPWSTR env, L
     sprintfW(new_cmd_line, argsW, winevdm, buffer, cmd_line);
     memset( &pe_info, 0, sizeof(pe_info) );
     pe_info.cpu = CPU_x86;
-    ret = create_process( 0, winevdm, new_cmd_line, env, cur_dir, psa, tsa, inherit,
+    ret = create_process( token, 0, winevdm, new_cmd_line, env, cur_dir, psa, tsa, inherit,
                           flags, startup, info, unixdir, &pe_info, exec_only );
     HeapFree( GetProcessHeap(), 0, new_cmd_line );
     return ret;
@@ -2458,7 +2486,7 @@ static BOOL create_vdm_process( LPCWSTR filename, LPWSTR cmd_line, LPWSTR env, L
  *
  * Create a new cmd shell process for a .BAT file.
  */
-static BOOL create_cmd_process( LPCWSTR filename, LPWSTR cmd_line, LPVOID env, LPCWSTR cur_dir,
+static BOOL create_cmd_process( HANDLE token, LPCWSTR filename, LPWSTR cmd_line, LPVOID env, LPCWSTR cur_dir,
                                 LPSECURITY_ATTRIBUTES psa, LPSECURITY_ATTRIBUTES tsa,
                                 BOOL inherit, DWORD flags, LPSTARTUPINFOW startup,
                                 LPPROCESS_INFORMATION info )
@@ -2486,8 +2514,8 @@ static BOOL create_cmd_process( LPCWSTR filename, LPWSTR cmd_line, LPVOID env, L
     strcatW( newcmdline, quotW );
     strcatW( newcmdline, cmd_line );
     strcatW( newcmdline, quotW );
-    ret = CreateProcessW( comspec, newcmdline, psa, tsa, inherit,
-                          flags, env, cur_dir, startup, info );
+    ret = CreateProcessInternalW( token, comspec, newcmdline, psa, tsa, inherit,
+                                  flags, env, cur_dir, startup, info, NULL );
     HeapFree( GetProcessHeap(), 0, newcmdline );
     return ret;
 }
@@ -2578,12 +2606,13 @@ static LPWSTR get_file_name( LPCWSTR appname, LPWSTR cmdline, LPWSTR buffer,
     return ret;
 }
 
-
-/* Steam hotpatches CreateProcessA and W, so to prevent it from crashing use an internal function */
-static BOOL create_process_impl( LPCWSTR app_name, LPWSTR cmd_line, LPSECURITY_ATTRIBUTES process_attr,
-                                 LPSECURITY_ATTRIBUTES thread_attr, BOOL inherit, DWORD flags,
-                                 LPVOID env, LPCWSTR cur_dir, LPSTARTUPINFOW startup_info,
-                                 LPPROCESS_INFORMATION info )
+/**********************************************************************
+ *      CreateProcessInternalW    (KERNEL32.@)
+ */
+BOOL WINAPI CreateProcessInternalW( HANDLE token, LPCWSTR app_name, LPWSTR cmd_line, LPSECURITY_ATTRIBUTES process_attr,
+                                    LPSECURITY_ATTRIBUTES thread_attr, BOOL inherit, DWORD flags,
+                                    LPVOID env, LPCWSTR cur_dir, LPSTARTUPINFOW startup_info,
+                                    LPPROCESS_INFORMATION info, HANDLE *new_token )
 {
     BOOL retv = FALSE;
     HANDLE hFile = 0;
@@ -2597,6 +2626,11 @@ static BOOL create_process_impl( LPCWSTR app_name, LPWSTR cmd_line, LPSECURITY_A
     /* Process the AppName and/or CmdLine to get module name and path */
 
     TRACE("app %s cmdline %s\n", debugstr_w(app_name), debugstr_w(cmd_line) );
+
+    /* FIXME: Starting a process which requires admin rights should fail
+     * with ERROR_ELEVATION_REQUIRED when no token is passed. */
+
+    if (new_token) FIXME("No support for returning created process token\n");
 
     if (!(tidy_cmdline = get_file_name( app_name, cmd_line, name, ARRAY_SIZE( name ), &hFile, &is_64bit )))
         return FALSE;
@@ -2682,18 +2716,18 @@ static BOOL create_process_impl( LPCWSTR app_name, LPWSTR cmd_line, LPSECURITY_A
                debugstr_w(name), is_64bit_arch(pe_info.cpu) ? 64 : 32,
                wine_dbgstr_longlong(pe_info.base), wine_dbgstr_longlong(pe_info.base + pe_info.map_size),
                cpu_names[pe_info.cpu] );
-        retv = create_process( hFile, name, tidy_cmdline, envW, cur_dir, process_attr, thread_attr,
+        retv = create_process( NULL, hFile, name, tidy_cmdline, envW, cur_dir, process_attr, thread_attr,
                                inherit, flags, startup_info, info, unixdir, &pe_info, FALSE );
         break;
     case BINARY_WIN16:
         TRACE( "starting %s as Win16/DOS binary\n", debugstr_w(name) );
-        retv = create_vdm_process( name, tidy_cmdline, envW, cur_dir, process_attr, thread_attr,
+        retv = create_vdm_process( token, name, tidy_cmdline, envW, cur_dir, process_attr, thread_attr,
                                    inherit, flags, startup_info, info, unixdir, FALSE );
         break;
     case BINARY_UNIX_LIB:
         TRACE( "starting %s as %d-bit Winelib app\n",
                debugstr_w(name), is_64bit_arch(pe_info.cpu) ? 64 : 32 );
-        retv = create_process( hFile, name, tidy_cmdline, envW, cur_dir, process_attr, thread_attr,
+        retv = create_process( token, hFile, name, tidy_cmdline, envW, cur_dir, process_attr, thread_attr,
                                inherit, flags, startup_info, info, unixdir, &pe_info, FALSE );
         break;
     case BINARY_UNKNOWN:
@@ -2703,14 +2737,14 @@ static BOOL create_process_impl( LPCWSTR app_name, LPWSTR cmd_line, LPSECURITY_A
             if (!strcmpiW( p, comW ) || !strcmpiW( p, pifW ))
             {
                 TRACE( "starting %s as DOS binary\n", debugstr_w(name) );
-                retv = create_vdm_process( name, tidy_cmdline, envW, cur_dir, process_attr, thread_attr,
+                retv = create_vdm_process( token, name, tidy_cmdline, envW, cur_dir, process_attr, thread_attr,
                                            inherit, flags, startup_info, info, unixdir, FALSE );
                 break;
             }
             if (!strcmpiW( p, batW ) || !strcmpiW( p, cmdW ) )
             {
                 TRACE( "starting %s as batch binary\n", debugstr_w(name) );
-                retv = create_cmd_process( name, tidy_cmdline, envW, cur_dir, process_attr, thread_attr,
+                retv = create_cmd_process( token, name, tidy_cmdline, envW, cur_dir, process_attr, thread_attr,
                                            inherit, flags, startup_info, info );
                 break;
             }
@@ -2773,8 +2807,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessA( LPCSTR app_name, LPSTR cmd_line, L
       FIXME("StartupInfo.lpReserved is used, please report (%s)\n",
             debugstr_a(startup_info->lpReserved));
 
-    ret = create_process_impl( app_nameW, cmd_lineW, process_attr, thread_attr,
-                               inherit, flags, env, cur_dirW, &infoW, info );
+    ret = CreateProcessInternalW( NULL, app_nameW, cmd_lineW, process_attr, thread_attr,
+                                  inherit, flags, env, cur_dirW, &infoW, info, NULL );
 done:
     HeapFree( GetProcessHeap(), 0, app_nameW );
     HeapFree( GetProcessHeap(), 0, cmd_lineW );
@@ -2793,8 +2827,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessW( LPCWSTR app_name, LPWSTR cmd_line,
                                               LPVOID env, LPCWSTR cur_dir, LPSTARTUPINFOW startup_info,
                                               LPPROCESS_INFORMATION info )
 {
-    return create_process_impl( app_name, cmd_line, process_attr, thread_attr,
-                                inherit, flags, env, cur_dir, startup_info, info);
+    return CreateProcessInternalW( NULL, app_name, cmd_line, process_attr, thread_attr,
+                                   inherit, flags, env, cur_dir, startup_info, info, NULL);
 }
 
 
@@ -2826,12 +2860,12 @@ static void exec_process( LPCWSTR name )
                debugstr_w(name), is_64bit_arch(pe_info.cpu) ? 64 : 32,
                wine_dbgstr_longlong(pe_info.base), wine_dbgstr_longlong(pe_info.base + pe_info.map_size),
                cpu_names[pe_info.cpu] );
-        create_process( hFile, name, GetCommandLineW(), NULL, NULL, NULL, NULL,
+        create_process( NULL, hFile, name, GetCommandLineW(), NULL, NULL, NULL, NULL,
                         FALSE, 0, &startup_info, &info, NULL, &pe_info, TRUE );
         break;
     case BINARY_UNIX_LIB:
         TRACE( "%s is a Unix library, starting as Winelib app\n", debugstr_w(name) );
-        create_process( hFile, name, GetCommandLineW(), NULL, NULL, NULL, NULL,
+        create_process( NULL, hFile, name, GetCommandLineW(), NULL, NULL, NULL, NULL,
                         FALSE, 0, &startup_info, &info, NULL, &pe_info, TRUE );
         break;
     case BINARY_UNKNOWN:
@@ -2841,7 +2875,7 @@ static void exec_process( LPCWSTR name )
         /* fall through */
     case BINARY_WIN16:
         TRACE( "starting %s as Win16/DOS binary\n", debugstr_w(name) );
-        create_vdm_process( name, GetCommandLineW(), NULL, NULL, NULL, NULL,
+        create_vdm_process( NULL, name, GetCommandLineW(), NULL, NULL, NULL, NULL,
                             FALSE, 0, &startup_info, &info, NULL, TRUE );
         break;
     default:

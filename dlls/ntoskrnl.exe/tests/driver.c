@@ -22,12 +22,16 @@
 
 #include <stdarg.h>
 
+#define NONAMELESSUNION
+#define NONAMELESSSTRUCT
+
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winternl.h"
 #include "winioctl.h"
+#include "ddk/ntddk.h"
 #include "ddk/wdm.h"
 
 #include "driver.h"
@@ -36,6 +40,8 @@ static const WCHAR driver_device[] = {'\\','D','e','v','i','c','e',
                                       '\\','W','i','n','e','T','e','s','t','D','r','i','v','e','r',0};
 static const WCHAR driver_link[] = {'\\','D','o','s','D','e','v','i','c','e','s',
                                     '\\','W','i','n','e','T','e','s','t','D','r','i','v','e','r',0};
+
+static LDR_MODULE *ldr_module;
 
 static HANDLE okfile;
 static LONG successes;
@@ -143,6 +149,22 @@ static void winetest_end_todo(void)
 #define todo_wine               todo_if(running_under_wine)
 #define todo_wine_if(is_todo)   todo_if((is_todo) && running_under_wine)
 
+static void *get_proc_address(const char *name)
+{
+    UNICODE_STRING name_u;
+    ANSI_STRING name_a;
+    NTSTATUS status;
+    void *ret;
+
+    RtlInitAnsiString(&name_a, name);
+    status = RtlAnsiStringToUnicodeString(&name_u, &name_a, TRUE);
+    if (status) return NULL;
+
+    ret = MmGetSystemRoutineAddress(&name_u);
+    RtlFreeUnicodeString(&name_u);
+    return ret;
+}
+
 static void test_currentprocess(void)
 {
     PEPROCESS current;
@@ -210,6 +232,378 @@ static void test_load_driver(void)
     ok(!ret, "got %#x\n", ret);
 }
 
+static NTSTATUS wait_single(void *obj, ULONGLONG timeout)
+{
+    LARGE_INTEGER integer;
+
+    integer.QuadPart = timeout;
+    return KeWaitForSingleObject(obj, Executive, KernelMode, FALSE, &integer);
+}
+
+static NTSTATUS wait_multiple(ULONG count, void *objs[], WAIT_TYPE wait_type, ULONGLONG timeout)
+{
+    LARGE_INTEGER integer;
+
+    integer.QuadPart = timeout;
+    return KeWaitForMultipleObjects(count, objs, wait_type, Executive, KernelMode, FALSE, &integer, NULL);
+}
+
+static void run_thread(PKSTART_ROUTINE proc, void *arg)
+{
+    OBJECT_ATTRIBUTES attr = {0};
+    HANDLE thread;
+    NTSTATUS ret;
+
+    attr.Length = sizeof(attr);
+    attr.Attributes = OBJ_KERNEL_HANDLE;
+    ret = PsCreateSystemThread(&thread, THREAD_ALL_ACCESS, &attr, NULL, NULL, proc, arg);
+    ok(!ret, "got %#x\n", ret);
+
+    ret = ZwWaitForSingleObject(thread, FALSE, NULL);
+    ok(!ret, "got %#x\n", ret);
+    ret = ZwClose(thread);
+    ok(!ret, "got %#x\n", ret);
+}
+
+static KMUTEX test_mutex;
+
+static void WINAPI mutex_thread(void *arg)
+{
+    NTSTATUS ret, expect = (NTSTATUS)(DWORD_PTR)arg;
+
+    ret = wait_single(&test_mutex, 0);
+    ok(ret == expect, "expected %#x, got %#x\n", expect, ret);
+
+    if (!ret) KeReleaseMutex(&test_mutex, FALSE);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+static void test_sync(void)
+{
+    KSEMAPHORE semaphore, semaphore2;
+    KEVENT manual_event, auto_event;
+    KTIMER timer;
+    LARGE_INTEGER timeout;
+    void *objs[2];
+    NTSTATUS ret;
+    int i;
+
+    KeInitializeEvent(&manual_event, NotificationEvent, FALSE);
+
+    ret = wait_single(&manual_event, 0);
+    ok(ret == STATUS_TIMEOUT, "got %#x\n", ret);
+
+    KeSetEvent(&manual_event, 0, FALSE);
+
+    ret = wait_single(&manual_event, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    ret = wait_single(&manual_event, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    KeResetEvent(&manual_event);
+
+    ret = wait_single(&manual_event, 0);
+    ok(ret == STATUS_TIMEOUT, "got %#x\n", ret);
+
+    KeInitializeEvent(&auto_event, SynchronizationEvent, FALSE);
+
+    ret = wait_single(&auto_event, 0);
+    ok(ret == STATUS_TIMEOUT, "got %#x\n", ret);
+
+    KeSetEvent(&auto_event, 0, FALSE);
+
+    ret = wait_single(&auto_event, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    ret = wait_single(&auto_event, 0);
+    ok(ret == STATUS_TIMEOUT, "got %#x\n", ret);
+
+    KeInitializeEvent(&auto_event, SynchronizationEvent, TRUE);
+
+    ret = wait_single(&auto_event, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    objs[0] = &manual_event;
+    objs[1] = &auto_event;
+
+    ret = wait_multiple(2, objs, WaitAny, 0);
+    ok(ret == STATUS_TIMEOUT, "got %#x\n", ret);
+
+    KeSetEvent(&manual_event, 0, FALSE);
+    KeSetEvent(&auto_event, 0, FALSE);
+
+    ret = wait_multiple(2, objs, WaitAny, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    ret = wait_single(&auto_event, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    KeResetEvent(&manual_event);
+    KeSetEvent(&auto_event, 0, FALSE);
+
+    ret = wait_multiple(2, objs, WaitAny, 0);
+    ok(ret == 1, "got %#x\n", ret);
+
+    ret = wait_multiple(2, objs, WaitAny, 0);
+    ok(ret == STATUS_TIMEOUT, "got %#x\n", ret);
+
+    KeSetEvent(&manual_event, 0, FALSE);
+    KeSetEvent(&auto_event, 0, FALSE);
+
+    ret = wait_multiple(2, objs, WaitAll, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    ret = wait_multiple(2, objs, WaitAll, 0);
+    ok(ret == STATUS_TIMEOUT, "got %#x\n", ret);
+
+    KeSetEvent(&auto_event, 0, FALSE);
+    KeResetEvent(&manual_event);
+
+    ret = wait_multiple(2, objs, WaitAll, 0);
+    ok(ret == STATUS_TIMEOUT, "got %#x\n", ret);
+
+    ret = wait_single(&auto_event, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    objs[0] = &auto_event;
+    objs[1] = &manual_event;
+    KeSetEvent(&manual_event, 0, FALSE);
+    KeSetEvent(&auto_event, 0, FALSE);
+
+    ret = wait_multiple(2, objs, WaitAny, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    ret = wait_multiple(2, objs, WaitAny, 0);
+    ok(ret == 1, "got %#x\n", ret);
+
+    ret = wait_multiple(2, objs, WaitAny, 0);
+    ok(ret == 1, "got %#x\n", ret);
+
+    /* test semaphores */
+    KeInitializeSemaphore(&semaphore, 0, 5);
+
+    ret = wait_single(&semaphore, 0);
+    ok(ret == STATUS_TIMEOUT, "got %u\n", ret);
+
+    ret = KeReleaseSemaphore(&semaphore, 0, 1, FALSE);
+    ok(ret == 0, "got prev %d\n", ret);
+
+    ret = KeReleaseSemaphore(&semaphore, 0, 2, FALSE);
+    ok(ret == 1, "got prev %d\n", ret);
+
+    ret = KeReleaseSemaphore(&semaphore, 0, 1, FALSE);
+    ok(ret == 3, "got prev %d\n", ret);
+
+    for (i = 0; i < 4; i++)
+    {
+        ret = wait_single(&semaphore, 0);
+        ok(ret == 0, "got %#x\n", ret);
+    }
+
+    ret = wait_single(&semaphore, 0);
+    ok(ret == STATUS_TIMEOUT, "got %#x\n", ret);
+
+    KeInitializeSemaphore(&semaphore2, 3, 5);
+
+    ret = KeReleaseSemaphore(&semaphore2, 0, 1, FALSE);
+    ok(ret == 3, "got prev %d\n", ret);
+
+    for (i = 0; i < 4; i++)
+    {
+        ret = wait_single(&semaphore2, 0);
+        ok(ret == 0, "got %#x\n", ret);
+    }
+
+    objs[0] = &semaphore;
+    objs[1] = &semaphore2;
+
+    ret = wait_multiple(2, objs, WaitAny, 0);
+    ok(ret == STATUS_TIMEOUT, "got %#x\n", ret);
+
+    KeReleaseSemaphore(&semaphore, 0, 1, FALSE);
+    KeReleaseSemaphore(&semaphore2, 0, 1, FALSE);
+
+    ret = wait_multiple(2, objs, WaitAny, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    ret = wait_multiple(2, objs, WaitAny, 0);
+    ok(ret == 1, "got %#x\n", ret);
+
+    ret = wait_multiple(2, objs, WaitAny, 0);
+    ok(ret == STATUS_TIMEOUT, "got %#x\n", ret);
+
+    KeReleaseSemaphore(&semaphore, 0, 1, FALSE);
+    KeReleaseSemaphore(&semaphore2, 0, 1, FALSE);
+
+    ret = wait_multiple(2, objs, WaitAll, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    ret = wait_multiple(2, objs, WaitAny, 0);
+    ok(ret == STATUS_TIMEOUT, "got %#x\n", ret);
+
+    /* test mutexes */
+    KeInitializeMutex(&test_mutex, 0);
+
+    for (i = 0; i < 10; i++)
+    {
+        ret = wait_single(&test_mutex, 0);
+        ok(ret == 0, "got %#x\n", ret);
+    }
+
+    for (i = 0; i < 10; i++)
+    {
+        ret = KeReleaseMutex(&test_mutex, FALSE);
+        ok(ret == i - 9, "expected %d, got %d\n", i - 9, ret);
+    }
+
+    run_thread(mutex_thread, (void *)0);
+
+    ret = wait_single(&test_mutex, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    run_thread(mutex_thread, (void *)STATUS_TIMEOUT);
+
+    ret = KeReleaseMutex(&test_mutex, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    run_thread(mutex_thread, (void *)0);
+
+    /* test timers */
+    KeInitializeTimerEx(&timer, NotificationTimer);
+
+    timeout.QuadPart = -100;
+    KeSetTimerEx(&timer, timeout, 0, NULL);
+
+    ret = wait_single(&timer, 0);
+    ok(ret == WAIT_TIMEOUT, "got %#x\n", ret);
+
+    ret = wait_single(&timer, -200);
+    ok(ret == 0, "got %#x\n", ret);
+
+    ret = wait_single(&timer, 0);
+    ok(ret == 0, "got %#x\n", ret);
+
+    KeCancelTimer(&timer);
+    KeInitializeTimerEx(&timer, SynchronizationTimer);
+
+    KeSetTimerEx(&timer, timeout, 0, NULL);
+
+    ret = wait_single(&timer, 0);
+    ok(ret == WAIT_TIMEOUT, "got %#x\n", ret);
+
+    ret = wait_single(&timer, -200);
+    ok(ret == 0, "got %#x\n", ret);
+
+    ret = wait_single(&timer, 0);
+    ok(ret == WAIT_TIMEOUT, "got %#x\n", ret);
+
+    KeCancelTimer(&timer);
+    KeSetTimerEx(&timer, timeout, 10, NULL);
+
+    ret = wait_single(&timer, 0);
+    ok(ret == WAIT_TIMEOUT, "got %#x\n", ret);
+
+    ret = wait_single(&timer, -200);
+    ok(ret == 0, "got %#x\n", ret);
+
+    ret = wait_single(&timer, 0);
+    ok(ret == WAIT_TIMEOUT, "got %#x\n", ret);
+
+    ret = wait_single(&timer, -20 * 10000);
+    ok(ret == 0, "got %#x\n", ret);
+
+    ret = wait_single(&timer, -20 * 10000);
+    ok(ret == 0, "got %#x\n", ret);
+
+    KeCancelTimer(&timer);
+}
+
+static void test_version(void)
+{
+    USHORT *pNtBuildNumber;
+    ULONG build;
+
+    pNtBuildNumber = get_proc_address("NtBuildNumber");
+    ok(!!pNtBuildNumber, "Could not get pointer to NtBuildNumber\n");
+
+    PsGetVersion(NULL, NULL, &build, NULL);
+    ok(*pNtBuildNumber == build, "Expected build number %u, got %u\n", build, *pNtBuildNumber);
+}
+
+static void test_lookaside_list(void)
+{
+    NPAGED_LOOKASIDE_LIST list;
+    ULONG tag = 0x454e4957; /* WINE */
+
+    ExInitializeNPagedLookasideList(&list, NULL, NULL, POOL_NX_ALLOCATION, LOOKASIDE_MINIMUM_BLOCK_SIZE, tag, 0);
+    ok(list.L.Depth == 4, "Expected 4 got %u\n", list.L.Depth);
+    ok(list.L.MaximumDepth == 256, "Expected 256 got %u\n", list.L.MaximumDepth);
+    ok(list.L.TotalAllocates == 0, "Expected 0 got %u\n", list.L.TotalAllocates);
+    ok(list.L.u2.AllocateMisses == 0, "Expected 0 got %u\n", list.L.u2.AllocateMisses);
+    ok(list.L.TotalFrees == 0, "Expected 0 got %u\n", list.L.TotalFrees);
+    ok(list.L.u3.FreeMisses == 0, "Expected 0 got %u\n", list.L.u3.FreeMisses);
+    ok(list.L.Type == (NonPagedPool|POOL_NX_ALLOCATION),
+       "Expected NonPagedPool|POOL_NX_ALLOCATION got %u\n", list.L.Type);
+    ok(list.L.Tag == tag, "Expected %x got %x\n", tag, list.L.Tag);
+    ok(list.L.Size == LOOKASIDE_MINIMUM_BLOCK_SIZE,
+       "Expected %u got %u\n", LOOKASIDE_MINIMUM_BLOCK_SIZE, list.L.Size);
+    ok(list.L.LastTotalAllocates == 0,"Expected 0 got %u\n", list.L.LastTotalAllocates);
+    ok(list.L.u6.LastAllocateMisses == 0,"Expected 0 got %u\n", list.L.u6.LastAllocateMisses);
+    ExDeleteNPagedLookasideList(&list);
+
+    list.L.Depth = 0;
+    ExInitializeNPagedLookasideList(&list, NULL, NULL, 0, LOOKASIDE_MINIMUM_BLOCK_SIZE, tag, 20);
+    ok(list.L.Depth == 4, "Expected 4 got %u\n", list.L.Depth);
+    ExDeleteNPagedLookasideList(&list);
+}
+
+static void test_default_modules(void)
+{
+    BOOL win32k = FALSE, dxgkrnl = FALSE, dxgmms1 = FALSE;
+    LIST_ENTRY *start, *entry;
+    ANSI_STRING name_a;
+    LDR_MODULE *mod;
+    NTSTATUS status;
+
+    /* Try to find start of the InLoadOrderModuleList list */
+    for (start = ldr_module->InLoadOrderModuleList.Flink; ; start = start->Flink)
+    {
+        mod = CONTAINING_RECORD(start, LDR_MODULE, InLoadOrderModuleList);
+
+        if (!MmIsAddressValid(&mod->BaseAddress) || !mod->BaseAddress) break;
+        if (!MmIsAddressValid(&mod->LoadCount) || !mod->LoadCount) break;
+        if (!MmIsAddressValid(&mod->SizeOfImage) || !mod->SizeOfImage) break;
+        if (!MmIsAddressValid(&mod->EntryPoint) || mod->EntryPoint < mod->BaseAddress ||
+            (DWORD_PTR)mod->EntryPoint > (DWORD_PTR)mod->BaseAddress + mod->SizeOfImage) break;
+    }
+
+    for (entry = start->Flink; entry != start; entry = entry->Flink)
+    {
+        mod = CONTAINING_RECORD(entry, LDR_MODULE, InLoadOrderModuleList);
+
+        status = RtlUnicodeStringToAnsiString(&name_a, &mod->BaseDllName, TRUE);
+        ok(!status, "RtlUnicodeStringToAnsiString failed with %08x\n", status);
+        if (status) continue;
+
+        if (entry == start->Flink)
+        {
+            ok(!strncmp(name_a.Buffer, "ntoskrnl.exe", name_a.Length),
+               "Expected ntoskrnl.exe, got %.*s\n", name_a.Length, name_a.Buffer);
+        }
+
+        if (!strncmp(name_a.Buffer, "win32k.sys", name_a.Length)) win32k = TRUE;
+        if (!strncmp(name_a.Buffer, "dxgkrnl.sys", name_a.Length)) dxgkrnl = TRUE;
+        if (!strncmp(name_a.Buffer, "dxgmms1.sys", name_a.Length)) dxgmms1 = TRUE;
+
+        RtlFreeAnsiString(&name_a);
+    }
+
+    ok(win32k, "Failed to find win32k.sys\n");
+    ok(dxgkrnl, "Failed to find dxgkrnl.sys\n");
+    ok(dxgmms1, "Failed to find dxgmms1.sys\n");
+}
+
 static NTSTATUS main_test(IRP *irp, IO_STACK_LOCATION *stack, ULONG_PTR *info)
 {
     ULONG length = stack->Parameters.DeviceIoControl.OutputBufferLength;
@@ -231,12 +625,17 @@ static NTSTATUS main_test(IRP *irp, IO_STACK_LOCATION *stack, ULONG_PTR *info)
     winetest_debug = test_input->winetest_debug;
     winetest_report_success = test_input->winetest_report_success;
     attr.ObjectName = &pathU;
+    attr.Attributes = OBJ_KERNEL_HANDLE;
     ZwOpenFile(&okfile, FILE_APPEND_DATA, &attr, &io, 0, 0);
 
     test_currentprocess();
     test_mdl_map();
     test_init_funcs();
     test_load_driver();
+    test_sync();
+    test_version();
+    test_lookaside_list();
+    test_default_modules();
 
     /* print process report */
     if (test_input->winetest_debug)
@@ -288,7 +687,7 @@ static NTSTATUS test_load_driver_ioctl(IRP *irp, IO_STACK_LOCATION *stack, ULONG
 
 static NTSTATUS WINAPI driver_Create(DEVICE_OBJECT *device, IRP *irp)
 {
-    irp->IoStatus.Status = STATUS_SUCCESS;
+    irp->IoStatus.u.Status = STATUS_SUCCESS;
     IoCompleteRequest(irp, IO_NO_INCREMENT);
     return STATUS_SUCCESS;
 }
@@ -313,14 +712,14 @@ static NTSTATUS WINAPI driver_IoControl(DEVICE_OBJECT *device, IRP *irp)
             break;
     }
 
-    irp->IoStatus.Status = status;
+    irp->IoStatus.u.Status = status;
     IoCompleteRequest(irp, IO_NO_INCREMENT);
     return status;
 }
 
 static NTSTATUS WINAPI driver_Close(DEVICE_OBJECT *device, IRP *irp)
 {
-    irp->IoStatus.Status = STATUS_SUCCESS;
+    irp->IoStatus.u.Status = STATUS_SUCCESS;
     IoCompleteRequest(irp, IO_NO_INCREMENT);
     return STATUS_SUCCESS;
 }
@@ -344,6 +743,8 @@ NTSTATUS WINAPI DriverEntry(DRIVER_OBJECT *driver, PUNICODE_STRING registry)
     NTSTATUS status;
 
     DbgPrint("loading driver\n");
+
+    ldr_module = (LDR_MODULE *)driver->DriverSection;
 
     /* Allow unloading of the driver */
     driver->DriverUnload = driver_Unload;

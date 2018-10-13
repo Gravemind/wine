@@ -144,20 +144,27 @@ typedef enum _KWAIT_REASON
     MaximumWaitReason,
 } KWAIT_REASON;
 
-typedef struct _ALLOCATE_FUNCTION *PALLOCATE_FUNCTION;
+typedef struct _KWAIT_BLOCK {
+    LIST_ENTRY WaitListEntry;
+    struct _KTHREAD *RESTRICTED_POINTER Thread;
+    PVOID Object;
+    struct _KWAIT_BLOCK *RESTRICTED_POINTER NextWaitBlock;
+    USHORT WaitKey;
+    USHORT WaitType;
+} KWAIT_BLOCK, *PKWAIT_BLOCK, *RESTRICTED_POINTER PRKWAIT_BLOCK;
+
 typedef struct _IO_TIMER *PIO_TIMER;
 typedef struct _IO_TIMER_ROUTINE *PIO_TIMER_ROUTINE;
 typedef struct _ETHREAD *PETHREAD;
-typedef struct _FREE_FUNCTION *PFREE_FUNCTION;
 typedef struct _KTHREAD *PKTHREAD, *PRKTHREAD;
 typedef struct _EPROCESS *PEPROCESS;
 typedef struct _ERESOURCE *PERESOURCE;
 typedef struct _IO_WORKITEM *PIO_WORKITEM;
-typedef struct _NPAGED_LOOKASIDE_LIST *PNPAGED_LOOKASIDE_LIST;
 typedef struct _PAGED_LOOKASIDE_LIST *PPAGED_LOOKASIDE_LIST;
 typedef struct _OBJECT_TYPE *POBJECT_TYPE;
 typedef struct _OBJECT_HANDLE_INFORMATION *POBJECT_HANDLE_INFORMATION;
 typedef struct _ZONE_HEADER *PZONE_HEADER;
+typedef struct _LOOKASIDE_LIST_EX *PLOOKASIDE_LIST_EX;
 
 typedef struct _FAST_MUTEX
 {
@@ -181,6 +188,11 @@ typedef struct _VPB {
   ULONG  ReferenceCount;
   WCHAR  VolumeLabel[MAXIMUM_VOLUME_LABEL_LENGTH / sizeof(WCHAR)];
 } VPB, *PVPB;
+
+#define POOL_QUOTA_FAIL_INSTEAD_OF_RAISE 0x8
+#define POOL_RAISE_IF_ALLOCATION_FAILURE 0x10
+#define POOL_COLD_ALLOCATION             0x100
+#define POOL_NX_ALLOCATION               0x200
 
 typedef enum _POOL_TYPE {
   NonPagedPool,
@@ -1221,6 +1233,71 @@ typedef struct _KLOCK_QUEUE_HANDLE {
     KIRQL OldIrql;
 } KLOCK_QUEUE_HANDLE, *PKLOCK_QUEUE_HANDLE;
 
+typedef void * (NTAPI *PALLOCATE_FUNCTION)(POOL_TYPE, SIZE_T, ULONG);
+typedef void * (NTAPI *PALLOCATE_FUNCTION_EX)(POOL_TYPE, SIZE_T, ULONG, PLOOKASIDE_LIST_EX);
+typedef void (NTAPI *PFREE_FUNCTION)(void *);
+typedef void (NTAPI *PFREE_FUNCTION_EX)(void *, PLOOKASIDE_LIST_EX);
+
+#ifdef _WIN64
+#define LOOKASIDE_ALIGN DECLSPEC_CACHEALIGN
+#else
+#define LOOKASIDE_ALIGN
+#endif
+
+#define LOOKASIDE_MINIMUM_BLOCK_SIZE (RTL_SIZEOF_THROUGH_FIELD(SLIST_ENTRY, Next))
+
+typedef struct LOOKASIDE_ALIGN _GENERAL_LOOKASIDE
+{
+    union
+    {
+        SLIST_HEADER ListHead;
+        SINGLE_LIST_ENTRY SingleListHead;
+    } DUMMYUNIONNAME;
+    USHORT Depth;
+    USHORT MaximumDepth;
+    ULONG TotalAllocates;
+    union
+    {
+        ULONG AllocateMisses;
+        ULONG AllocateHits;
+    } DUMMYUNIONNAME2;
+    ULONG TotalFrees;
+    union
+    {
+        ULONG FreeMisses;
+        ULONG FreeHits;
+    } DUMMYUNIONNAME3;
+    POOL_TYPE Type;
+    ULONG Tag;
+    ULONG Size;
+    union
+    {
+        PALLOCATE_FUNCTION_EX AllocateEx;
+        PALLOCATE_FUNCTION Allocate;
+    } DUMMYUNIONNAME4;
+    union
+    {
+        PFREE_FUNCTION_EX FreeEx;
+        PFREE_FUNCTION Free;
+    } DUMMYUNIONNAME5;
+    LIST_ENTRY ListEntry;
+    ULONG LastTotalAllocates;
+    union
+    {
+        ULONG LastAllocateMisses;
+        ULONG LastAllocateHits;
+    } DUMMYUNIONNAME6;
+    ULONG Future[2];
+} GENERAL_LOOKASIDE;
+
+typedef struct LOOKASIDE_ALIGN _NPAGED_LOOKASIDE_LIST
+{
+    GENERAL_LOOKASIDE L;
+#if defined(__i386__)
+    KSPIN_LOCK Lock__ObsoleteButDoNotDelete;
+#endif
+} NPAGED_LOOKASIDE_LIST, *PNPAGED_LOOKASIDE_LIST;
+
 typedef NTSTATUS (NTAPI EX_CALLBACK_FUNCTION)(void *CallbackContext, void *Argument1, void *Argument2);
 typedef EX_CALLBACK_FUNCTION *PEX_CALLBACK_FUNCTION;
 
@@ -1373,8 +1450,10 @@ PVOID     WINAPI ExAllocatePool(POOL_TYPE,SIZE_T);
 PVOID     WINAPI ExAllocatePoolWithQuota(POOL_TYPE,SIZE_T);
 PVOID     WINAPI ExAllocatePoolWithTag(POOL_TYPE,SIZE_T,ULONG);
 PVOID     WINAPI ExAllocatePoolWithQuotaTag(POOL_TYPE,SIZE_T,ULONG);
+void      WINAPI ExDeleteNPagedLookasideList(PNPAGED_LOOKASIDE_LIST);
 void      WINAPI ExFreePool(PVOID);
 void      WINAPI ExFreePoolWithTag(PVOID,ULONG);
+void      WINAPI ExInitializeNPagedLookasideList(PNPAGED_LOOKASIDE_LIST,PALLOCATE_FUNCTION,PFREE_FUNCTION,ULONG,SIZE_T,ULONG,USHORT);
 PSLIST_ENTRY WINAPI ExInterlockedPopEntrySList(PSLIST_HEADER,PKSPIN_LOCK);
 PSLIST_ENTRY WINAPI ExInterlockedPushEntrySList(PSLIST_HEADER,PSLIST_ENTRY,PKSPIN_LOCK);
 void      WINAPI ExReleaseFastMutexUnsafe(PFAST_MUTEX);
@@ -1409,7 +1488,12 @@ void      WINAPI IoReleaseCancelSpinLock(KIRQL);
 NTSTATUS  WINAPI IoSetDeviceInterfaceState(UNICODE_STRING*,BOOLEAN);
 NTSTATUS  WINAPI IoWMIRegistrationControl(PDEVICE_OBJECT,ULONG);
 
+BOOLEAN   WINAPI KeCancelTimer(KTIMER*);
+void      WINAPI KeClearEvent(PRKEVENT);
+NTSTATUS  WINAPI KeDelayExecutionThread(KPROCESSOR_MODE,BOOLEAN,LARGE_INTEGER*);
 PKTHREAD  WINAPI KeGetCurrentThread(void);
+void      WINAPI KeInitializeEvent(PRKEVENT,EVENT_TYPE,BOOLEAN);
+void      WINAPI KeInitializeMutex(PRKMUTEX,ULONG);
 void      WINAPI KeInitializeSemaphore(PRKSEMAPHORE,LONG,LONG);
 void      WINAPI KeInitializeTimerEx(PKTIMER,TIMER_TYPE);
 void      WINAPI KeQuerySystemTime(LARGE_INTEGER*);
@@ -1421,6 +1505,9 @@ LONG      WINAPI KeResetEvent(PRKEVENT);
 LONG      WINAPI KeSetEvent(PRKEVENT,KPRIORITY,BOOLEAN);
 KPRIORITY WINAPI KeSetPriorityThread(PKTHREAD,KPRIORITY);
 void      WINAPI KeSetSystemAffinityThread(KAFFINITY);
+BOOLEAN   WINAPI KeSetTimerEx(KTIMER*,LARGE_INTEGER,LONG,KDPC*);
+NTSTATUS  WINAPI KeWaitForMultipleObjects(ULONG,void*[],WAIT_TYPE,KWAIT_REASON,KPROCESSOR_MODE,BOOLEAN,LARGE_INTEGER*,KWAIT_BLOCK*);
+NTSTATUS  WINAPI KeWaitForSingleObject(void*,KWAIT_REASON,KPROCESSOR_MODE,BOOLEAN,LARGE_INTEGER*);
 
 PVOID     WINAPI MmAllocateContiguousMemory(SIZE_T,PHYSICAL_ADDRESS);
 PVOID     WINAPI MmAllocateNonCachedMemory(SIZE_T);
