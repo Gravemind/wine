@@ -60,6 +60,7 @@ HRESULT WINAPI BasicAudioImpl_GetTypeInfo(IBasicAudio *iface, UINT iTInfo, LCID 
     return BaseDispatchImpl_GetTypeInfo(&This->baseDispatch, &IID_NULL, iTInfo, lcid, ppTInfo);
 }
 
+__attribute__((optimize ("omit-frame-pointer")))
 HRESULT WINAPI BasicAudioImpl_GetIDsOfNames(IBasicAudio *iface, REFIID riid, LPOLESTR *rgszNames, UINT cNames, LCID lcid, DISPID *rgDispId)
 {
     BasicAudio *This = impl_from_IBasicAudio(iface);

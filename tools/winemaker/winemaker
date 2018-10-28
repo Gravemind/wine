@@ -1079,9 +1079,9 @@ sub source_scan_project_file($$$)
     }
     if ((@$target[$T_FLAGS] & $TF_NOMSVCRT) == 0) {
         push @{@$target[$T_LDFLAGS]},"-mno-cygwin";
-        if ($opt_arch != $OPT_ARCH_DEFAULT) {
-            push @{@$target[$T_LDFLAGS]},"-m$opt_arch";
-        }
+    }
+    if ($opt_arch != $OPT_ARCH_DEFAULT) {
+        push @{@$target[$T_LDFLAGS]},"-m$opt_arch";
     }
     push @{@$project[$P_TARGETS]},$target;
 
@@ -1143,10 +1143,10 @@ sub source_scan_project_file($$$)
 
     if ((@$project_settings[$T_FLAGS] & $TF_NOMSVCRT) == 0) {
         push @{@$project_settings[$T_CEXTRA]},"-mno-cygwin";
-        if ($opt_arch != $OPT_ARCH_DEFAULT) {
-            push @{@$project_settings[$T_CEXTRA]},"-m$opt_arch";
-            push @{@$project_settings[$T_CXXEXTRA]},"-m$opt_arch";
-        }
+    }
+    if ($opt_arch != $OPT_ARCH_DEFAULT) {
+        push @{@$project_settings[$T_CEXTRA]},"-m$opt_arch";
+        push @{@$project_settings[$T_CXXEXTRA]},"-m$opt_arch";
     }
 
     if (@$project_settings[$T_FLAGS] & $TF_MFC) {
@@ -1608,9 +1608,9 @@ sub source_scan_directory($$$$)
     }
     if ((@$target[$T_FLAGS] & $TF_NOMSVCRT) == 0) {
       push @{@$target[$T_LDFLAGS]},"-mno-cygwin";
-      if ($opt_arch != $OPT_ARCH_DEFAULT) {
+    }
+    if ($opt_arch != $OPT_ARCH_DEFAULT) {
         push @{@$target[$T_LDFLAGS]},"-m$opt_arch";
-      }
     }
     push @{@$project[$P_TARGETS]},$target;
 
@@ -1702,10 +1702,10 @@ sub source_scan_directory($$$$)
 
   if ((@$project_settings[$T_FLAGS] & $TF_NOMSVCRT) == 0) {
     push @{@$project_settings[$T_CEXTRA]},"-mno-cygwin";
-      if ($opt_arch != $OPT_ARCH_DEFAULT) {
-        push @{@$project_settings[$T_CEXTRA]},"-m$opt_arch";
-        push @{@$project_settings[$T_CXXEXTRA]},"-m$opt_arch";
-      }
+  }
+  if ($opt_arch != $OPT_ARCH_DEFAULT) {
+      push @{@$project_settings[$T_CEXTRA]},"-m$opt_arch";
+      push @{@$project_settings[$T_CXXEXTRA]},"-m$opt_arch";
   }
 
   if (@$project_settings[$T_FLAGS] & $TF_MFC) {
