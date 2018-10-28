@@ -698,6 +698,7 @@ static HRESULT WINAPI MediaPositionPassThru_GetTypeInfo(IMediaPosition *iface, U
     return BaseDispatchImpl_GetTypeInfo(&This->baseDispatch, &IID_NULL, iTInfo, lcid, ppTInfo);
 }
 
+__attribute__((optimize ("omit-frame-pointer")))
 static HRESULT WINAPI MediaPositionPassThru_GetIDsOfNames(IMediaPosition *iface, REFIID riid, LPOLESTR*rgszNames, UINT cNames, LCID lcid, DISPID*rgDispId)
 {
     PassThruImpl *This = impl_from_IMediaPosition(iface);
