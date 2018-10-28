@@ -718,8 +718,8 @@
 # @ stub GetLongPathNameTransactedW
 @ stdcall GetLongPathNameW (wstr long long)
 @ stdcall GetMailslotInfo(long ptr ptr ptr ptr)
-# @ stub GetMaximumProcessorCount
-# @ stub GetMaximumProcessorGroupCount
+@ stdcall GetMaximumProcessorCount(long)
+@ stdcall GetMaximumProcessorGroupCount()
 @ stdcall GetModuleFileNameA(long ptr long)
 @ stdcall GetModuleFileNameW(long ptr long)
 @ stdcall GetModuleHandleA(str)
@@ -806,7 +806,7 @@
 @ stdcall GetProfileStringA(str str str ptr long)
 @ stdcall GetProfileStringW(wstr wstr wstr ptr long)
 @ stdcall GetQueuedCompletionStatus(long ptr ptr ptr long)
-@ stdcall GetQueuedCompletionStatusEx(ptr ptr long ptr long long)
+#@ stdcall GetQueuedCompletionStatusEx(ptr ptr long ptr long long)
 @ stub -i386 GetSLCallbackTarget
 @ stub -i386 GetSLCallbackTemplate
 @ stdcall GetShortPathNameA(str ptr long)

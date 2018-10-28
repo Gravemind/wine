@@ -181,6 +181,8 @@ static HRESULT DirectSoundDevice_Create(DirectSoundDevice ** ppDevice)
 
     RtlInitializeResource(&(device->buffer_list_lock));
 
+    init_eax_device(device);
+
    *ppDevice = device;
 
     return DS_OK;
@@ -234,6 +236,8 @@ static ULONG DirectSoundDevice_Release(DirectSoundDevice * device)
             IAudioStreamVolume_Release(device->volume);
         if(device->mmdevice)
             IMMDevice_Release(device->mmdevice);
+
+        HeapFree(GetProcessHeap(), 0, device->dsp_buffer);
         HeapFree(GetProcessHeap(), 0, device->tmp_buffer);
         HeapFree(GetProcessHeap(), 0, device->cp_buffer);
         HeapFree(GetProcessHeap(), 0, device->buffer);
