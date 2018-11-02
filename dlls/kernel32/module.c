@@ -988,33 +988,43 @@ static HMODULE load_library( const UNICODE_STRING *libname, DWORD flags )
         FIXME("unsupported flag(s) used (flags: 0x%08x)\n", flags);
 
     if((p = strcasestrW(libname->Buffer, steamclientW)) &&
-            (p == libname->Buffer ||
-             *(p - 1) != 'l')){
-
-        if(!lsteamclient_hmod)
-            lsteamclient_hmod = LoadLibraryA("lsteamclient.dll");
-
-        if(!steamclient_hmod){
-            HANDLE f = CreateFileW(steamclient_pathW,
-                    GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-            if(f != INVALID_HANDLE_VALUE){
-                DWORD sz, readed;
-
-                sz = GetFileSize(f, NULL);
-
-                steamclient_hmod = HeapAlloc(GetProcessHeap(), 0, sz);
-                ReadFile(f, steamclient_hmod, sz, &readed, NULL);
-
-                CloseHandle(f);
-            }else{
-                /* this will fail DRM checks, but otherwise should work */
-                ERR("somehow failed to load steamclient\n");
-                steamclient_hmod = lsteamclient_hmod;
-            }
+       (p == libname->Buffer ||
+        *(p - 1) != 'l'))
+    {
+        char *enable_lsteamclient = getenv("WINE_LSTEAMCLIENT");
+        if (enable_lsteamclient == NULL || enable_lsteamclient[0] != '1' || enable_lsteamclient[1] != '\0')
+        {
+            TRACE( "lsteamclient hijack disabled (empty env WINE_LSTEAMCLIENT): %s\n", debugstr_w(libname->Buffer));
         }
+        else
+        {
+            TRACE( "hijacking lsteamclient (found env WINE_LSTEAMCLIENT): %s\n", debugstr_w(libname->Buffer));
 
-        return steamclient_hmod;
+            if(!lsteamclient_hmod)
+                lsteamclient_hmod = LoadLibraryA("lsteamclient.dll");
+
+            if(!steamclient_hmod){
+                HANDLE f = CreateFileW(steamclient_pathW,
+                                       GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                       NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                if(f != INVALID_HANDLE_VALUE){
+                    DWORD sz, readed;
+
+                    sz = GetFileSize(f, NULL);
+
+                    steamclient_hmod = HeapAlloc(GetProcessHeap(), 0, sz);
+                    ReadFile(f, steamclient_hmod, sz, &readed, NULL);
+
+                    CloseHandle(f);
+                }else{
+                    /* this will fail DRM checks, but otherwise should work */
+                    ERR("somehow failed to load steamclient\n");
+                    steamclient_hmod = lsteamclient_hmod;
+                }
+            }
+
+            return steamclient_hmod;
+        }
     }
 
     if (flags & load_library_search_flags)
