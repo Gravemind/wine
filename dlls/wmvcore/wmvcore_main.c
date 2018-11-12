@@ -2122,6 +2122,11 @@ HRESULT WINAPI WMCreateSyncReader(IUnknown *pcert, DWORD rights, IWMSyncReader *
     return E_NOTIMPL;
 }
 
+HRESULT WINAPI WMCreateSyncReaderPriv(IWMSyncReader **syncreader)
+{
+    return WMCreateSyncReader(NULL, 0, syncreader);
+}
+
 typedef struct {
     IWMProfileManager IWMProfileManager_iface;
     LONG ref;
