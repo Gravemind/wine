@@ -265,6 +265,7 @@ static int           proximity_in_type;
 static int           proximity_out_type;
 
 static HWND          hwndTabletDefault;
+static HWND          gActiveOwner;
 static WTPACKET      gMsgPacket;
 static DWORD         gSerial;
 static DWORD         lastX = 0xffff;
@@ -928,7 +929,7 @@ static BOOL motion_event( HWND hwnd, XEvent *event )
     gMsgPacket.pkNormalPressure = motion->axis_data[2];
     gMsgPacket.pkButtons = get_button_state(curnum);
     gMsgPacket.pkChanged = get_changed_state(&gMsgPacket);
-    SendMessageW(hwndTabletDefault,WT_PACKET,gMsgPacket.pkSerialNumber,(LPARAM)hwnd);
+    SendMessageW(hwndTabletDefault,WT_PACKET,gMsgPacket.pkSerialNumber,(LPARAM)gActiveOwner);
     return TRUE;
 }
 
@@ -965,7 +966,7 @@ static BOOL button_event( HWND hwnd, XEvent *event )
     gMsgPacket.pkNormalPressure = button->axis_data[2];
     gMsgPacket.pkButtons = get_button_state(curnum);
     gMsgPacket.pkChanged = get_changed_state(&gMsgPacket);
-    SendMessageW(hwndTabletDefault,WT_PACKET,gMsgPacket.pkSerialNumber,(LPARAM)hwnd);
+    SendMessageW(hwndTabletDefault,WT_PACKET,gMsgPacket.pkSerialNumber,(LPARAM)gActiveOwner);
     return TRUE;
 }
 
@@ -1021,7 +1022,7 @@ static BOOL proximity_event( HWND hwnd, XEvent *event )
      */
     proximity_info = MAKELPARAM((event->type == proximity_in_type),
                      (event->type == proximity_in_type) || (event->type == proximity_out_type));
-    SendMessageW(hwndTabletDefault, WT_PROXIMITY, (WPARAM)hwnd, proximity_info);
+    SendMessageW(hwndTabletDefault, WT_PROXIMITY, (WPARAM)gActiveOwner, proximity_info);
     return TRUE;
 }
 
@@ -1038,11 +1039,11 @@ int CDECL X11DRV_AttachEventQueueToTablet(HWND hOwner)
     XDeviceInfo     *target = NULL;
     XDevice         *the_device;
     XEventClass     event_list[7];
-    Window          win = X11DRV_get_whole_window( hOwner );
-
-    if (!win || !xinput_handle) return 0;
+    Window          win = X11DRV_get_whole_window(GetDesktopWindow());
 
     TRACE("Creating context for window %p (%lx)  %i cursors\n", hOwner, win, gNumCursors);
+
+    gActiveOwner = hOwner;
 
     devices = pXListInputDevices(data->display, &num_devices);
 
